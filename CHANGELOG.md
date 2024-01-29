@@ -1,6 +1,6 @@
 # Changelog
 
-## [1.26.0] - unreleased
+## [1.26.0] - 2023-04-25
 
 This version of Rustup involves a significant number of internal refactors, both in terms
 of the Rustup code and its tests.
