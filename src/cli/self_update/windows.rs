@@ -1,4 +1,3 @@
-use std::cell::RefCell;
 use std::env::{consts::EXE_SUFFIX, split_paths};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -13,6 +12,7 @@ use super::super::errors::*;
 use super::common;
 use super::{install_bins, InstallOpts};
 use crate::cli::download_tracker::DownloadTracker;
+use crate::currentprocess::{filesource::StdoutSource, varsource::VarSource};
 use crate::dist::dist::TargetTriple;
 use crate::process;
 use crate::utils::utils;
@@ -22,14 +22,17 @@ use winreg::enums::{RegType, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE};
 use winreg::{RegKey, RegValue};
 
 pub(crate) fn ensure_prompt() -> Result<()> {
-    writeln!(process().stdout(),)?;
-    writeln!(process().stdout(), "Press the Enter key to continue.")?;
+    writeln!(process().stdout().lock(),)?;
+    writeln!(
+        process().stdout().lock(),
+        "Press the Enter key to continue."
+    )?;
     common::read_line()?;
     Ok(())
 }
 
 fn choice(max: u8) -> Result<Option<u8>> {
-    write!(process().stdout(), ">")?;
+    write!(process().stdout().lock(), ">")?;
 
     let _ = std::io::stdout().flush();
     let input = common::read_line()?;
@@ -39,30 +42,33 @@ fn choice(max: u8) -> Result<Option<u8>> {
         _ => None,
     };
 
-    writeln!(process().stdout())?;
+    writeln!(process().stdout().lock())?;
     Ok(r)
 }
 
 pub(crate) fn choose_vs_install() -> Result<Option<VsInstallPlan>> {
     writeln!(
-        process().stdout(),
+        process().stdout().lock(),
         "\n1) Quick install via the Visual Studio Community installer"
     )?;
     writeln!(
-        process().stdout(),
+        process().stdout().lock(),
         "   (free for individuals, academic uses, and open source)."
     )?;
     writeln!(
-        process().stdout(),
+        process().stdout().lock(),
         "\n2) Manually install the prerequisites"
     )?;
     writeln!(
-        process().stdout(),
+        process().stdout().lock(),
         "   (for enterprise and advanced users)."
     )?;
-    writeln!(process().stdout(), "\n3) Don't install the prerequisites")?;
     writeln!(
-        process().stdout(),
+        process().stdout().lock(),
+        "\n3) Don't install the prerequisites"
+    )?;
+    writeln!(
+        process().stdout().lock(),
         "   (if you're targeting the GNU ABI).\n"
     )?;
 
@@ -70,7 +76,7 @@ pub(crate) fn choose_vs_install() -> Result<Option<VsInstallPlan>> {
         if let Some(n) = choice(3)? {
             break n;
         }
-        writeln!(process().stdout(), "Select option 1, 2 or 3")?;
+        writeln!(process().stdout().lock(), "Select option 1, 2 or 3")?;
     };
     let plan = match choice {
         1 => Some(VsInstallPlan::Automatic),
@@ -174,13 +180,14 @@ pub(crate) fn try_install_msvc(opts: &InstallOpts<'_>) -> Result<ContinueInstall
         .context("error creating temp directory")?;
 
     let visual_studio = tempdir.path().join("vs_setup.exe");
-    let download_tracker = RefCell::new(DownloadTracker::new().with_display_progress(true));
-    download_tracker.borrow_mut().download_finished();
+    let download_tracker = DownloadTracker::new_with_display_progress(true);
+    download_tracker.lock().unwrap().download_finished();
 
     info!("downloading Visual Studio installer");
     utils::download_file(&visual_studio_url, &visual_studio, None, &move |n| {
         download_tracker
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .handle_notification(&crate::Notification::Install(
                 crate::dist::Notification::Utils(n),
             ));
@@ -259,6 +266,7 @@ fn has_windows_sdk_libs() -> bool {
 }
 
 /// Run by rustup-gc-$num.exe to delete CARGO_HOME
+#[cfg_attr(feature = "otel", tracing::instrument)]
 pub fn complete_windows_uninstall() -> Result<utils::ExitCode> {
     use std::process::Stdio;
 
@@ -703,6 +711,8 @@ mod tests {
     use winreg::enums::{RegType, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE};
     use winreg::{RegKey, RegValue};
 
+    use rustup_macros::unit_test as test;
+
     use crate::currentprocess;
     use crate::test::with_saved_path;
 
@@ -744,9 +754,9 @@ mod tests {
     #[test]
     fn windows_path_regkey_type() {
         // per issue #261, setting PATH should use REG_EXPAND_SZ.
-        let tp = Box::new(currentprocess::TestProcess::default());
+        let tp = currentprocess::TestProcess::default();
         with_saved_path(&mut || {
-            currentprocess::with(tp.clone(), || {
+            currentprocess::with(tp.clone().into(), || {
                 let root = RegKey::predef(HKEY_CURRENT_USER);
                 let environment = root
                     .open_subkey_with_flags("Environment", KEY_READ | KEY_WRITE)
@@ -774,9 +784,9 @@ mod tests {
         use std::io;
         // during uninstall the PATH key may end up empty; if so we should
         // delete it.
-        let tp = Box::new(currentprocess::TestProcess::default());
+        let tp = currentprocess::TestProcess::default();
         with_saved_path(&mut || {
-            currentprocess::with(tp.clone(), || {
+            currentprocess::with(tp.clone().into(), || {
                 let root = RegKey::predef(HKEY_CURRENT_USER);
                 let environment = root
                     .open_subkey_with_flags("Environment", KEY_READ | KEY_WRITE)
@@ -809,15 +819,15 @@ mod tests {
     #[test]
     fn windows_doesnt_mess_with_a_non_string_path() {
         // This writes an error, so we want a sink for it.
-        let tp = Box::new(currentprocess::TestProcess {
+        let tp = currentprocess::TestProcess {
             vars: [("HOME".to_string(), "/unused".to_string())]
                 .iter()
                 .cloned()
                 .collect(),
             ..Default::default()
-        });
+        };
         with_saved_path(&mut || {
-            currentprocess::with(tp.clone(), || {
+            currentprocess::with(tp.clone().into(), || {
                 let root = RegKey::predef(HKEY_CURRENT_USER);
                 let environment = root
                     .open_subkey_with_flags("Environment", KEY_READ | KEY_WRITE)
@@ -844,9 +854,9 @@ mod tests {
     #[test]
     fn windows_treat_missing_path_as_empty() {
         // during install the PATH key may be missing; treat it as empty
-        let tp = Box::new(currentprocess::TestProcess::default());
+        let tp = currentprocess::TestProcess::default();
         with_saved_path(&mut || {
-            currentprocess::with(tp.clone(), || {
+            currentprocess::with(tp.clone().into(), || {
                 let root = RegKey::predef(HKEY_CURRENT_USER);
                 let environment = root
                     .open_subkey_with_flags("Environment", KEY_READ | KEY_WRITE)

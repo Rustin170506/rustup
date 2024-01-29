@@ -4,8 +4,9 @@
 use std::fs;
 
 use rustup::for_host;
+use rustup_macros::integration_test as test;
 
-use crate::mock::clitools::{self, set_current_dist_date, Config, Scenario};
+use rustup::test::mock::clitools::{self, set_current_dist_date, Config, Scenario};
 
 pub fn setup(f: &dyn Fn(&mut Config)) {
     clitools::test(Scenario::SimpleV1, f);
@@ -175,7 +176,7 @@ fn bad_sha_on_manifest() {
 fn bad_sha_on_installer() {
     setup(&|config| {
         let dir = config.distdir.as_ref().unwrap().join("dist");
-        for file in fs::read_dir(&dir).unwrap() {
+        for file in fs::read_dir(dir).unwrap() {
             let file = file.unwrap();
             let path = file.path();
             let filename = path.to_string_lossy();

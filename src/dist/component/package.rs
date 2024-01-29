@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, bail, Context, Result};
 use tar::EntryType;
 
+use crate::currentprocess::{filesource::StderrSource, varsource::VarSource};
 use crate::diskio::{get_executor, CompletedIo, Executor, FileBuffer, Item, Kind, IO_CHUNK_SIZE};
 use crate::dist::component::components::*;
 use crate::dist::component::transaction::*;
@@ -150,7 +151,7 @@ impl<'a> TarPackage<'a> {
         // $pkgname-$version-$target. Skip that directory when
         // unpacking.
         unpack_without_first_dir(&mut archive, &temp_dir, notify_handler)
-            .context("failed to extract package (perhaps you ran out of disk space?)")?;
+            .context("failed to extract package")?;
 
         Ok(TarPackage(
             DirectoryPackage::new(temp_dir.to_owned(), false)?,
@@ -456,7 +457,7 @@ fn unpack_without_first_dir<R: Read>(
                         // Tar has item before containing directory
                         // Complain about this so we can see if these exist.
                         writeln!(
-                            process().stderr(),
+                            process().stderr().lock(),
                             "Unexpected: missing parent '{}' for '{}'",
                             parent.display(),
                             entry.path()?.display()

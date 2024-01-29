@@ -3,6 +3,9 @@
 use std::env;
 use std::ffi::OsString;
 
+use enum_dispatch::enum_dispatch;
+
+#[enum_dispatch]
 pub trait VarSource {
     // In order to support dyn dispatch we use concrete types rather than the
     // stdlib signature.
@@ -20,6 +23,7 @@ impl VarSource for super::OSProcess {
     }
 }
 
+#[cfg(feature = "test")]
 impl VarSource for super::TestProcess {
     fn var(&self, key: &str) -> std::result::Result<String, env::VarError> {
         match self.var_os(key) {

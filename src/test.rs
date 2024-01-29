@@ -1,5 +1,8 @@
 #![allow(clippy::box_default)]
 //! Test support module; public to permit use from integration tests.
+
+pub mod mock;
+
 use std::collections::HashMap;
 use std::env;
 use std::ffi::OsStr;
@@ -121,8 +124,8 @@ pub fn this_host_triple() -> String {
         // For windows, this host may be different to the target: we may be
         // building with i686 toolchain, but on an x86_64 host, so run the
         // actual detection logic and trust it.
-        let tp = Box::new(currentprocess::TestProcess::default());
-        return currentprocess::with(tp, || TargetTriple::from_host().unwrap().to_string());
+        let tp = currentprocess::TestProcess::default();
+        return currentprocess::with(tp.into(), || TargetTriple::from_host().unwrap().to_string());
     }
     let arch = if cfg!(target_arch = "x86") {
         "i686"
@@ -169,7 +172,7 @@ macro_rules! for_host {
     };
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 /// The smallest form of test isolation: an isolated RUSTUP_HOME, for codepaths
 /// that read and write config files but do not invoke processes, download data
 /// etc.
@@ -216,4 +219,89 @@ where
     let test_dir = test_dir()?;
     let rustup_home = RustupHome::new_in(test_dir)?;
     f(&rustup_home)
+}
+
+#[cfg(feature = "otel")]
+use once_cell::sync::Lazy;
+#[cfg(feature = "otel")]
+use tokio;
+
+/// A tokio runtime for the sync tests, permitting the use of tracing. This is
+/// never shutdown, instead it is just dropped at end of process.
+#[cfg(feature = "otel")]
+static TRACE_RUNTIME: Lazy<tokio::runtime::Runtime> =
+    Lazy::new(|| tokio::runtime::Runtime::new().unwrap());
+/// A tracer for the tests.
+#[cfg(feature = "otel")]
+static TRACER: Lazy<opentelemetry_sdk::trace::Tracer> = Lazy::new(|| {
+    use std::time::Duration;
+
+    use opentelemetry::{global, KeyValue};
+    use opentelemetry_otlp::WithExportConfig;
+    use opentelemetry_sdk::{
+        propagation::TraceContextPropagator,
+        trace::{self, Sampler},
+        Resource,
+    };
+    use tokio::runtime::Handle;
+    use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Registry};
+
+    // Use the current runtime, or the sync test runtime otherwise.
+    let handle = match Handle::try_current() {
+        Ok(handle) => handle,
+        Err(_) => TRACE_RUNTIME.handle().clone(),
+    };
+    let _guard = handle.enter();
+
+    let tracer = opentelemetry_otlp::new_pipeline()
+        .tracing()
+        .with_exporter(
+            opentelemetry_otlp::new_exporter()
+                .tonic()
+                .with_timeout(Duration::from_secs(3)),
+        )
+        .with_trace_config(
+            trace::config()
+                .with_sampler(Sampler::AlwaysOn)
+                .with_resource(Resource::new(vec![KeyValue::new("service.name", "rustup")])),
+        )
+        .install_batch(opentelemetry_sdk::runtime::Tokio)
+        .unwrap();
+
+    global::set_text_map_propagator(TraceContextPropagator::new());
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or(EnvFilter::new("INFO"));
+    let telemetry = tracing_opentelemetry::layer().with_tracer(tracer.clone());
+    let subscriber = Registry::default().with(env_filter).with(telemetry);
+    tracing::subscriber::set_global_default(subscriber).unwrap();
+    tracer
+});
+
+pub fn before_test() {
+    #[cfg(feature = "otel")]
+    {
+        Lazy::force(&TRACER);
+    }
+}
+
+pub async fn before_test_async() {
+    #[cfg(feature = "otel")]
+    {
+        Lazy::force(&TRACER);
+    }
+}
+
+pub fn after_test() {
+    #[cfg(feature = "otel")]
+    {
+        let handle = TRACE_RUNTIME.handle();
+        let _guard = handle.enter();
+        TRACER.provider().map(|p| p.force_flush());
+    }
+}
+
+pub async fn after_test_async() {
+    #[cfg(feature = "otel")]
+    {
+        TRACER.provider().map(|p| p.force_flush());
+    }
 }

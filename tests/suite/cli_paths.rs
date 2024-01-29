@@ -12,9 +12,10 @@ mod unix {
     use std::path::PathBuf;
 
     use rustup::utils::raw;
+    use rustup_macros::integration_test as test;
 
     use super::INIT_NONE;
-    use crate::mock::clitools::{self, Scenario};
+    use rustup::test::mock::clitools::{self, Scenario};
 
     // Let's write a fake .rc which looks vaguely like a real script.
     const FAKE_RC: &str = r#"
@@ -135,6 +136,45 @@ export PATH="$HOME/apple/bin"
             let mut cmd = clitools::cmd(config, "rustup-init", &INIT_NONE[1..]);
             cmd.env("SHELL", "zsh");
             cmd.env("ZDOTDIR", zdotdir.path());
+            assert!(cmd.output().unwrap().status.success());
+
+            let new_rc = fs::read_to_string(&rc).unwrap();
+            let expected = FAKE_RC.to_owned() + &source(config.cargodir.display(), POSIX_SH);
+            assert_eq!(new_rc, expected);
+        });
+    }
+
+    #[test]
+    fn install_with_zdotdir_from_calling_zsh() {
+        // This test requires that zsh is callable.
+        if std::process::Command::new("zsh")
+            .arg("-c")
+            .arg("true")
+            .status()
+            .is_err()
+        {
+            return;
+        }
+        clitools::test(Scenario::Empty, &|config| {
+            let zdotdir = tempfile::Builder::new()
+                .prefix("zdotdir")
+                .tempdir()
+                .unwrap();
+            let rc = zdotdir.path().join(".zshenv");
+            raw::write_file(&rc, FAKE_RC).unwrap();
+
+            // If $SHELL doesn't include "zsh", Zsh::zdotdir() will call zsh to obtain $ZDOTDIR.
+            // ZDOTDIR could be set directly in the environment, but having ~/.zshenv set
+            // ZDOTDIR is a normal setup, and ensures that the value came from calling zsh.
+            let home_zshenv = config.homedir.join(".zshenv");
+            let export_zdotdir = format!(
+                "export ZDOTDIR=\"{}\"\n",
+                zdotdir.path().as_os_str().to_str().unwrap()
+            );
+            raw::write_file(&home_zshenv, &export_zdotdir).unwrap();
+
+            let mut cmd = clitools::cmd(config, "rustup-init", &INIT_NONE[1..]);
+            cmd.env("SHELL", "/bin/sh");
             assert!(cmd.output().unwrap().status.success());
 
             let new_rc = fs::read_to_string(&rc).unwrap();
@@ -350,32 +390,30 @@ export PATH="$HOME/apple/bin"
 
 #[cfg(windows)]
 mod windows {
+    use rustup::test::mock::clitools::{self, Scenario};
     use rustup::test::{get_path, with_saved_path};
+    use rustup_macros::integration_test as test;
 
     use super::INIT_NONE;
-    use crate::mock::clitools::{self, Scenario};
 
     #[test]
     /// Smoke test for end-to-end code connectivity of the installer path mgmt on windows.
     fn install_uninstall_affect_path() {
         clitools::test(Scenario::Empty, &|config| {
             with_saved_path(&mut || {
-                let path = format!("{:?}", config.cargodir.join("bin").to_string_lossy());
+                let cfg_path = config.cargodir.join("bin").display().to_string();
+                let get_path_ = || get_path().unwrap().unwrap().to_string();
 
                 config.expect_ok(&INIT_NONE);
                 assert!(
-                    get_path()
-                        .unwrap()
-                        .unwrap()
-                        .to_string()
-                        .contains(path.trim_matches('"')),
+                    get_path_().contains(cfg_path.trim_matches('"')),
                     "`{}` not in `{}`",
-                    path,
-                    get_path().unwrap().unwrap()
+                    cfg_path,
+                    get_path_()
                 );
 
                 config.expect_ok(&["rustup", "self", "uninstall", "-y"]);
-                assert!(!get_path().unwrap().unwrap().to_string().contains(&path));
+                assert!(!get_path_().contains(&cfg_path));
             })
         });
     }

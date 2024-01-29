@@ -6,9 +6,9 @@ use std::io::Write;
 
 use rustup::dist::dist::TargetTriple;
 use rustup::for_host;
+use rustup::test::mock::clitools::{self, set_current_dist_date, Config, Scenario};
 use rustup::test::this_host_triple;
-
-use crate::mock::clitools::{self, set_current_dist_date, Config, Scenario};
+use rustup_macros::integration_test as test;
 
 pub fn setup(f: &dyn Fn(&mut Config)) {
     clitools::test(Scenario::SimpleV2, f);
@@ -304,7 +304,7 @@ fn bad_sha_on_installer() {
     setup(&|config| {
         // Since the v2 sha's are contained in the manifest, corrupt the installer
         let dir = config.distdir.as_ref().unwrap().join("dist/2015-01-02");
-        for file in fs::read_dir(&dir).unwrap() {
+        for file in fs::read_dir(dir).unwrap() {
             let file = file.unwrap();
             let path = file.path();
             let filename = path.to_string_lossy();
@@ -752,9 +752,9 @@ fn add_target_bogus() {
         config.expect_ok(&["rustup", "default", "nightly"]);
         config.expect_err(
             &["rustup", "target", "add", "bogus"],
-            "does not contain component 'rust-std' for target 'bogus'\n\
-                note: not all platforms have the standard library pre-compiled: https://doc.rust-lang.org/nightly/rustc/platform-support.html\n\
-                help: consider using `cargo build -Z build-std` instead",
+            "does not support target 'bogus'\n\
+            note: you can see a list of supported targets with `rustc --print=target-list`\n\
+            note: if you are adding support for a new target to rustc itself, see https://rustc-dev-guide.rust-lang.org/building/new-target.html",
         );
     });
 }
@@ -771,7 +771,7 @@ fn add_target_v1_toolchain() {
                 clitools::CROSS_ARCH1,
                 "--toolchain=nightly",
             ],
-            for_host!("Missing manifest in toolchain 'nightly-{0}'"),
+            for_host!("toolchain 'nightly-{0}' does not support components (v1 manifest)"),
         );
     });
 }
@@ -797,7 +797,7 @@ fn cannot_add_empty_named_custom_toolchain() {
         let path = path.to_string_lossy();
         config.expect_err(
             &["rustup", "toolchain", "link", "", &path],
-            "toolchain names must not be empty",
+            "invalid value '' for '<toolchain>': invalid toolchain name ''",
         );
     });
 }
@@ -866,7 +866,7 @@ fn remove_target_not_installed() {
         config.expect_err(
             &["rustup", "target", "remove", clitools::CROSS_ARCH1],
             &format!(
-                "toolchain 'nightly-{}' does not contain component 'rust-std' for target '{}'",
+                "toolchain 'nightly-{}' does not have target '{}' installed",
                 this_host_triple(),
                 clitools::CROSS_ARCH1
             ),
@@ -896,7 +896,7 @@ fn remove_target_bogus() {
         config.expect_ok(&["rustup", "default", "nightly"]);
         config.expect_err(
             &["rustup", "target", "remove", "bogus"],
-            "does not contain component 'rust-std' for target 'bogus'",
+            "does not have target 'bogus' installed",
         );
     });
 }
@@ -913,7 +913,7 @@ fn remove_target_v1_toolchain() {
                 clitools::CROSS_ARCH1,
                 "--toolchain=nightly",
             ],
-            for_host!("Missing manifest in toolchain 'nightly-{0}'"),
+            for_host!("toolchain 'nightly-{0}' does not support components (v1 manifest)"),
         );
     });
 }
@@ -941,7 +941,7 @@ fn remove_target_again() {
         config.expect_err(
             &["rustup", "target", "remove", clitools::CROSS_ARCH1],
             &format!(
-                "toolchain 'nightly-{}' does not contain component 'rust-std' for target '{}'",
+                "toolchain 'nightly-{}' does not have target '{}' installed",
                 this_host_triple(),
                 clitools::CROSS_ARCH1
             ),
@@ -952,9 +952,31 @@ fn remove_target_again() {
 #[test]
 fn remove_target_host() {
     setup(&|config| {
-        let trip = this_host_triple();
+        let host = this_host_triple();
         config.expect_ok(&["rustup", "default", "nightly"]);
-        config.expect_ok(&["rustup", "target", "remove", &trip]);
+        config.expect_ok(&["rustup", "target", "add", clitools::CROSS_ARCH1]);
+        config.expect_stderr_ok(
+            &["rustup", "target", "remove", &host], 
+            "after removing the default host target, proc-macros and build scripts might no longer build",
+        );
+        let path = format!("toolchains/nightly-{host}/lib/rustlib/{host}/lib/libstd.rlib");
+        assert!(!config.rustupdir.has(path));
+        let path = format!("toolchains/nightly-{host}/lib/rustlib/{host}/lib");
+        assert!(!config.rustupdir.has(path));
+        let path = format!("toolchains/nightly-{host}/lib/rustlib/{host}");
+        assert!(!config.rustupdir.has(path));
+    });
+}
+
+#[test]
+fn remove_target_last() {
+    setup(&|config| {
+        let host = this_host_triple();
+        config.expect_ok(&["rustup", "default", "nightly"]);
+        config.expect_stderr_ok(
+            &["rustup", "target", "remove", &host],
+            "after removing the last target, no build targets will be available",
+        );
     });
 }
 
@@ -974,32 +996,30 @@ fn remove_target_missing_update_hash() {
 // Issue #1777
 #[test]
 fn warn_about_and_remove_stray_hash() {
-    setup(&|config| {
+    clitools::test(Scenario::None, &|config| {
         let mut hash_path = config.rustupdir.join("update-hashes");
         fs::create_dir_all(&hash_path).expect("Unable to make the update-hashes directory");
-
         hash_path.push(for_host!("nightly-{}"));
-
         let mut file = fs::File::create(&hash_path).expect("Unable to open update-hash file");
         file.write_all(b"LEGITHASH")
             .expect("Unable to write update-hash");
         drop(file);
 
-        config.expect_stderr_ok(
-            &["rustup", "toolchain", "install", "nightly"],
-            &format!(
-                "removing stray hash found at '{}' in order to continue",
-                hash_path.display()
-            ),
-        );
-        config.expect_ok(&["rustup", "default", "nightly"]);
-        config.expect_stdout_ok(&["rustc", "--version"], "1.3.0");
+        config.with_scenario(Scenario::SimpleV2, &|config| {
+            config.expect_stderr_ok(
+                &["rustup", "toolchain", "install", "nightly"],
+                &format!(
+                    "removing stray hash found at '{}' in order to continue",
+                    hash_path.display()
+                ),
+            );
+        })
     });
 }
 
 fn make_component_unavailable(config: &Config, name: &str, target: &str) {
-    use crate::mock::dist::create_hash;
     use rustup::dist::manifest::Manifest;
+    use rustup::test::mock::dist::create_hash;
 
     let manifest_path = config
         .distdir
@@ -1037,6 +1057,27 @@ fn update_unavailable_std() {
 }
 
 #[test]
+fn add_missing_component() {
+    setup(&|config| {
+        make_component_unavailable(config, "rls-preview", &this_host_triple());
+        config.expect_ok(&["rustup", "toolchain", "add", "nightly"]);
+        config.expect_err(
+            &["rustup", "component", "add", "rls-preview"],
+            for_host!(
+                "component 'rls' for target '{0}' is unavailable for download for channel 'nightly'\n\
+                Sometimes not all components are available in any given nightly."
+            ),
+        );
+        // Make sure the following pattern does not match,
+        // thus addressing https://github.com/rust-lang/rustup/issues/3418.
+        config.expect_not_stderr_err(
+            &["rustup", "component", "add", "rls-preview"],
+            "If you don't need the component, you can remove it with:",
+        );
+    });
+}
+
+#[test]
 fn add_missing_component_toolchain() {
     setup(&|config| {
         make_component_unavailable(config, "rust-std", &this_host_triple());
@@ -1046,7 +1087,18 @@ fn add_missing_component_toolchain() {
                 r"component 'rust-std' for target '{0}' is unavailable for download for channel 'nightly'
 Sometimes not all components are available in any given nightly. If you don't need the component, you could try a minimal installation with:
 
-    rustup toolchain add nightly --profile minimal"
+    rustup toolchain add nightly --profile minimal
+
+If you require these components, please install and use the latest successful build version,
+which you can find at <https://rust-lang.github.io/rustup-components-history>.
+
+After determining the correct date, install it with a command such as:
+
+    rustup toolchain install nightly-2018-12-27
+
+Then you can use the toolchain with commands such as:
+
+    cargo +nightly-2018-12-27 build"
             ),
         );
     });

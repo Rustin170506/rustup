@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 
+use rustup_macros::unit_test as test;
+
 use crate::test::test_dir;
 
 use super::{get_executor, Executor, Item, Kind};
@@ -21,11 +23,11 @@ fn test_incremental_file(io_threads: &str) -> Result<()> {
     let work_dir = test_dir()?;
     let mut vars = HashMap::new();
     vars.insert("RUSTUP_IO_THREADS".to_string(), io_threads.to_string());
-    let tp = Box::new(currentprocess::TestProcess {
+    let tp = currentprocess::TestProcess {
         vars,
         ..Default::default()
-    });
-    currentprocess::with(tp, || -> Result<()> {
+    };
+    currentprocess::with(tp.into(), || -> Result<()> {
         let mut written = 0;
         let mut file_finished = false;
         let mut io_executor: Box<dyn Executor> = get_executor(None, 32 * 1024 * 1024)?;
@@ -34,10 +36,10 @@ fn test_incremental_file(io_threads: &str) -> Result<()> {
             0o666,
             io_executor.incremental_file_state(),
         )?;
-        for _ in io_executor.execute(item).collect::<Vec<_>>() {
-            // The file should be open and incomplete, and no completed chunks
-            unreachable!();
-        }
+
+        // The file should be open and incomplete, and no completed chunks
+        assert!(io_executor.execute(item).collect::<Vec<_>>().is_empty());
+
         let mut chunk = io_executor.get_buffer(super::IO_CHUNK_SIZE);
         chunk.extend(b"0123456789");
         chunk = chunk.finished();
@@ -74,13 +76,12 @@ fn test_incremental_file(io_threads: &str) -> Result<()> {
                 break;
             }
         }
-        assert!(file_finished);
-        for _ in io_executor.join().collect::<Vec<_>>() {
-            // no more work should be outstanding
-            unreachable!();
-        }
 
+        // no more work should be outstanding
+        assert!(file_finished);
+        assert!(io_executor.join().collect::<Vec<_>>().is_empty());
         assert_eq!(io_executor.buffer_used(), 0);
+
         Ok(())
     })?;
     // We should be able to read back the file
@@ -95,11 +96,11 @@ fn test_complete_file(io_threads: &str) -> Result<()> {
     let work_dir = test_dir()?;
     let mut vars = HashMap::new();
     vars.insert("RUSTUP_IO_THREADS".to_string(), io_threads.to_string());
-    let tp = Box::new(currentprocess::TestProcess {
+    let tp = currentprocess::TestProcess {
         vars,
         ..Default::default()
-    });
-    currentprocess::with(tp, || -> Result<()> {
+    };
+    currentprocess::with(tp.into(), || -> Result<()> {
         let mut io_executor: Box<dyn Executor> = get_executor(None, 32 * 1024 * 1024)?;
         let mut chunk = io_executor.get_buffer(10);
         chunk.extend(b"0123456789");
@@ -141,10 +142,9 @@ fn test_complete_file(io_threads: &str) -> Result<()> {
             }
         }
         assert!(items > 0);
-        for _ in io_executor.join().collect::<Vec<_>>() {
-            // no more work should be outstanding
-            unreachable!();
-        }
+        // no more work should be outstanding
+        assert!(io_executor.join().collect::<Vec<_>>().is_empty());
+
         Ok(())
     })?;
     // We should be able to read back the file with correct content
@@ -156,21 +156,21 @@ fn test_complete_file(io_threads: &str) -> Result<()> {
 }
 
 #[test]
-fn test_incremental_file_immediate() -> Result<()> {
-    test_incremental_file("1")
+fn test_incremental_file_immediate() {
+    test_incremental_file("1").unwrap()
 }
 
 #[test]
-fn test_incremental_file_threaded() -> Result<()> {
-    test_incremental_file("2")
+fn test_incremental_file_threaded() {
+    test_incremental_file("2").unwrap()
 }
 
 #[test]
-fn test_complete_file_immediate() -> Result<()> {
-    test_complete_file("1")
+fn test_complete_file_immediate() {
+    test_complete_file("1").unwrap()
 }
 
 #[test]
-fn test_complete_file_threaded() -> Result<()> {
-    test_complete_file("2")
+fn test_complete_file_threaded() {
+    test_complete_file("2").unwrap()
 }

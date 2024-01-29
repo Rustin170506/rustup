@@ -1,4 +1,3 @@
-use std::cmp::Ord;
 use std::env;
 use std::fs::{self, File};
 use std::io::{self, BufReader, Write};
@@ -11,7 +10,7 @@ use retry::{retry, OperationResult};
 use sha2::Sha256;
 use url::Url;
 
-// use crate::currentprocess::cwdsource::CurrentDirSource;
+use crate::currentprocess::{cwdsource::CurrentDirSource, varsource::VarSource};
 use crate::errors::*;
 use crate::utils::notifications::Notification;
 use crate::utils::raw;
@@ -65,7 +64,7 @@ pub(crate) fn append_file(name: &'static str, path: &Path, line: &str) -> Result
 
 pub(crate) fn write_line(
     name: &'static str,
-    file: &mut File,
+    mut file: impl Write,
     path: &Path,
     line: &str,
 ) -> Result<()> {
@@ -152,6 +151,9 @@ pub(crate) fn download_file_with_resume(
     match download_file_(url, path, hasher, resume_from_partial, notify_handler) {
         Ok(_) => Ok(()),
         Err(e) => {
+            if e.downcast_ref::<std::io::Error>().is_some() {
+                return Err(e);
+            }
             let is_client_error = match e.downcast_ref::<DEK>() {
                 // Specifically treat the bad partial range error as not our
                 // fault in case it was something odd which happened.
@@ -402,9 +404,7 @@ pub fn remove_file(name: &'static str, path: &Path) -> Result<()> {
 pub(crate) fn ensure_file_removed(name: &'static str, path: &Path) -> Result<()> {
     let result = remove_file(name, path);
     if let Err(err) = &result {
-        if let Some(retry::Error::Operation { error: e, .. }) =
-            err.downcast_ref::<retry::Error<io::Error>>()
-        {
+        if let Some(retry::Error { error: e, .. }) = err.downcast_ref::<retry::Error<io::Error>>() {
             if e.kind() == io::ErrorKind::NotFound {
                 return Ok(());
             }
@@ -536,40 +536,6 @@ pub(crate) fn format_path_for_display(path: &str) -> String {
         None => path.to_owned(),
         Some(_) => path[4..].to_owned(),
     }
-}
-
-pub(crate) fn toolchain_sort<T: AsRef<str>>(v: &mut [T]) {
-    use semver::{BuildMetadata, Prerelease, Version};
-
-    fn special_version(ord: u64, s: &str) -> Version {
-        Version {
-            major: 0,
-            minor: 0,
-            patch: 0,
-            pre: Prerelease::new(&format!("pre.{}.{}", ord, s.replace('_', "-"))).unwrap(),
-            build: BuildMetadata::EMPTY,
-        }
-    }
-
-    fn toolchain_sort_key(s: &str) -> Version {
-        if s.starts_with("stable") {
-            special_version(0, s)
-        } else if s.starts_with("beta") {
-            special_version(1, s)
-        } else if s.starts_with("nightly") {
-            special_version(2, s)
-        } else {
-            Version::parse(&s.replace('_', "-")).unwrap_or_else(|_| special_version(3, s))
-        }
-    }
-
-    v.sort_by(|a, b| {
-        let a_str: &str = a.as_ref();
-        let b_str: &str = b.as_ref();
-        let a_key = toolchain_sort_key(a_str);
-        let b_key = toolchain_sort_key(b_str);
-        a_key.cmp(&b_key)
-    });
 }
 
 #[cfg(target_os = "linux")]
@@ -743,34 +709,9 @@ pub(crate) fn home_dir_from_passwd() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use rustup_macros::unit_test as test;
+
     use super::*;
-
-    #[test]
-    fn test_toolchain_sort() {
-        let expected = vec![
-            "stable-x86_64-unknown-linux-gnu",
-            "beta-x86_64-unknown-linux-gnu",
-            "nightly-x86_64-unknown-linux-gnu",
-            "1.0.0-x86_64-unknown-linux-gnu",
-            "1.2.0-x86_64-unknown-linux-gnu",
-            "1.8.0-x86_64-unknown-linux-gnu",
-            "1.10.0-x86_64-unknown-linux-gnu",
-        ];
-
-        let mut v = vec![
-            "1.8.0-x86_64-unknown-linux-gnu",
-            "1.0.0-x86_64-unknown-linux-gnu",
-            "nightly-x86_64-unknown-linux-gnu",
-            "stable-x86_64-unknown-linux-gnu",
-            "1.10.0-x86_64-unknown-linux-gnu",
-            "beta-x86_64-unknown-linux-gnu",
-            "1.2.0-x86_64-unknown-linux-gnu",
-        ];
-
-        toolchain_sort(&mut v);
-
-        assert_eq!(expected, v);
-    }
 
     #[test]
     fn test_remove_file() {

@@ -4,16 +4,19 @@
     clippy::type_complexity,
     clippy::upper_case_acronyms, // see https://github.com/rust-lang/rust-clippy/issues/6974
     clippy::vec_init_then_push, // uses two different styles of initialization
+    clippy::box_default, // its ugly and outside of inner loops irrelevant
+    clippy::result_large_err, // 288 bytes is our 'large' variant today, which is unlikely to be a performance problem
+    clippy::arc_with_non_send_sync, // will get resolved as we move further into async
 )]
 #![recursion_limit = "1024"]
 
-pub use crate::config::*;
+pub(crate) use crate::config::*;
 use crate::currentprocess::*;
 pub use crate::errors::*;
-pub use crate::notifications::*;
-use crate::toolchain::*;
+pub(crate) use crate::notifications::*;
 pub(crate) use crate::utils::toml_utils;
 use anyhow::{anyhow, Result};
+use itertools::{chain, Itertools};
 
 #[macro_use]
 extern crate rs_tracing;
@@ -39,23 +42,15 @@ pub static DUP_TOOLS: &[&str] = &["rust-analyzer", "rustfmt", "cargo-fmt"];
 
 // If the given name is one of the tools we proxy.
 pub fn is_proxyable_tools(tool: &str) -> Result<()> {
-    if TOOLS
-        .iter()
-        .chain(DUP_TOOLS.iter())
-        .any(|&name| name == tool)
-    {
+    if chain!(TOOLS, DUP_TOOLS).contains(&tool) {
         Ok(())
     } else {
-        Err(anyhow!(format!(
-            "unknown proxy name: '{}'; valid proxy names are {}",
-            tool,
-            TOOLS
-                .iter()
-                .chain(DUP_TOOLS.iter())
+        Err(anyhow!(
+            "unknown proxy name: '{tool}'; valid proxy names are {}",
+            chain!(TOOLS, DUP_TOOLS)
                 .map(|s| format!("'{s}'"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )))
+                .join(", "),
+        ))
     }
 }
 
@@ -94,12 +89,15 @@ mod fallback_settings;
 mod install;
 pub mod notifications;
 mod settings;
+#[cfg(feature = "test")]
 pub mod test;
 mod toolchain;
 pub mod utils;
 
 #[cfg(test)]
 mod tests {
+    use rustup_macros::unit_test as test;
+
     use crate::{is_proxyable_tools, DUP_TOOLS, TOOLS};
 
     #[test]

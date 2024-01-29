@@ -1,13 +1,22 @@
 use anyhow::Result;
-use clap::{builder::PossibleValuesParser, AppSettings, Arg, ArgAction, Command};
+use clap::{builder::PossibleValuesParser, value_parser, Arg, ArgAction, Command};
 
-use super::common;
-use super::self_update::{self, InstallOpts};
-use crate::dist::dist::Profile;
-use crate::process;
-use crate::utils::utils;
+use crate::{
+    cli::{
+        common,
+        self_update::{self, InstallOpts},
+    },
+    currentprocess::{argsource::ArgSource, filesource::StdoutSource},
+    dist::dist::Profile,
+    process,
+    toolchain::names::MaybeOfficialToolchainName,
+    utils::utils,
+};
 
+#[cfg_attr(feature = "otel", tracing::instrument)]
 pub fn main() -> Result<utils::ExitCode> {
+    use clap::error::ErrorKind;
+
     let args: Vec<_> = process().args().collect();
     let arg1 = args.get(1).map(|a| &**a);
 
@@ -25,8 +34,8 @@ pub fn main() -> Result<utils::ExitCode> {
     // NOTICE: If you change anything here, please make the same changes in rustup-init.sh
     let cli = Command::new("rustup-init")
         .version(common::version())
+        .before_help(format!("rustup-init {}", common::version()))
         .about("The installer for rustup")
-        .setting(AppSettings::DeriveDisplayOrder)
         .arg(
             Arg::new("verbose")
                 .short('v')
@@ -51,14 +60,15 @@ pub fn main() -> Result<utils::ExitCode> {
         .arg(
             Arg::new("default-host")
                 .long("default-host")
-                .takes_value(true)
+                .num_args(1)
                 .help("Choose a default host triple"),
         )
         .arg(
             Arg::new("default-toolchain")
                 .long("default-toolchain")
-                .takes_value(true)
-                .help("Choose a default toolchain to install. Use 'none' to not install any toolchains at all"),
+                .num_args(1)
+                .help("Choose a default toolchain to install. Use 'none' to not install any toolchains at all")
+                .value_parser(value_parser!(MaybeOfficialToolchainName))
         )
         .arg(
             Arg::new("profile")
@@ -71,8 +81,7 @@ pub fn main() -> Result<utils::ExitCode> {
                 .help("Component name to also install")
                 .long("component")
                 .short('c')
-                .takes_value(true)
-                .multiple_values(true)
+                .num_args(1..)
                 .use_value_delimiter(true)
                 .action(ArgAction::Append),
         )
@@ -81,8 +90,7 @@ pub fn main() -> Result<utils::ExitCode> {
                 .help("Target name to also install")
                 .long("target")
                 .short('t')
-                .takes_value(true)
-                .multiple_values(true)
+                .num_args(1..)
                 .use_value_delimiter(true)
                 .action(ArgAction::Append),
         )
@@ -101,10 +109,7 @@ pub fn main() -> Result<utils::ExitCode> {
 
     let matches = match cli.try_get_matches_from(process().args_os()) {
         Ok(matches) => matches,
-        Err(e)
-            if e.kind() == clap::ErrorKind::DisplayHelp
-                || e.kind() == clap::ErrorKind::DisplayVersion =>
-        {
+        Err(e) if [ErrorKind::DisplayHelp, ErrorKind::DisplayVersion].contains(&e.kind()) => {
             write!(process().stdout().lock(), "{e}")?;
             return Ok(utils::ExitCode(0));
         }
@@ -117,7 +122,7 @@ pub fn main() -> Result<utils::ExitCode> {
         .get_one::<String>("default-host")
         .map(ToOwned::to_owned);
     let default_toolchain = matches
-        .get_one::<String>("default-toolchain")
+        .get_one::<MaybeOfficialToolchainName>("default-toolchain")
         .map(ToOwned::to_owned);
     let profile = matches
         .get_one::<String>("profile")

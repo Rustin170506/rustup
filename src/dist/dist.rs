@@ -8,86 +8,103 @@ use std::str::FromStr;
 
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::NaiveDate;
-use lazy_static::lazy_static;
+use once_cell::sync::Lazy;
 use regex::Regex;
 use thiserror::Error as ThisError;
 
-use crate::dist::download::DownloadCfg;
-use crate::dist::manifest::{Component, Manifest as ManifestV2};
-use crate::dist::manifestation::{Changes, Manifestation, UpdateStatus};
-use crate::dist::notifications::*;
-use crate::dist::prefix::InstallPrefix;
-use crate::dist::temp;
 pub(crate) use crate::dist::triple::*;
-use crate::errors::RustupError;
-use crate::process;
-use crate::utils::utils;
-
+use crate::{
+    currentprocess::varsource::VarSource,
+    dist::{
+        download::DownloadCfg,
+        manifest::{Component, Manifest as ManifestV2},
+        manifestation::{Changes, Manifestation, UpdateStatus},
+        notifications::*,
+        prefix::InstallPrefix,
+        temp,
+    },
+    errors::RustupError,
+    process,
+    toolchain::names::ToolchainName,
+    utils::utils,
+};
 pub static DEFAULT_DIST_SERVER: &str = "https://static.rust-lang.org";
 
 // Deprecated
 pub(crate) static DEFAULT_DIST_ROOT: &str = "https://static.rust-lang.org/dist";
 
-// The channel patterns we support
-static TOOLCHAIN_CHANNELS: &[&str] = &[
-    "nightly",
-    "beta",
-    "stable",
-    // Allow from 1.0.0 through to 9.999.99 with optional patch version
-    r"\d{1}\.\d{1,3}(?:\.\d{1,2})?",
-];
+const TOOLSTATE_MSG: &str =
+    "If you require these components, please install and use the latest successful build version,\n\
+     which you can find at <https://rust-lang.github.io/rustup-components-history>.\n\nAfter determining \
+     the correct date, install it with a command such as:\n\n    \
+     rustup toolchain install nightly-2018-12-27\n\n\
+     Then you can use the toolchain with commands such as:\n\n    \
+     cargo +nightly-2018-12-27 build";
 
+/// Returns a error message indicating that certain [`Component`]s are missing in a toolchain distribution.
+///
+/// This message is currently used exclusively in toolchain-wide operations,
+/// otherwise [`component_unavailable_msg`](../../errors/fn.component_unavailable_msg.html) will be used.
+///
+/// # Panics
+/// This function will panic when the collection of unavailable components `cs` is empty.
 fn components_missing_msg(cs: &[Component], manifest: &ManifestV2, toolchain: &str) -> String {
-    assert!(!cs.is_empty());
     let mut buf = vec![];
     let suggestion = format!("    rustup toolchain add {toolchain} --profile minimal");
     let nightly_tips = "Sometimes not all components are available in any given nightly. ";
 
-    if cs.len() == 1 {
-        let _ = writeln!(
-            buf,
-            "component {} is unavailable for download for channel '{}'",
-            &cs[0].description(manifest),
-            toolchain,
-        );
+    match cs {
+        [] => panic!("`components_missing_msg` should not be called with an empty collection of unavailable components"),
+        [c] => {
+            let _ = writeln!(
+                buf,
+                "component {} is unavailable for download for channel '{}'",
+                c.description(manifest),
+                toolchain,
+            );
 
-        if toolchain.starts_with("nightly") {
-            let _ = write!(buf, "{nightly_tips}");
+            if toolchain.starts_with("nightly") {
+                let _ = write!(buf, "{nightly_tips}");
+            }
+
+            let _ = write!(
+                buf,
+                "If you don't need the component, you could try a minimal installation with:\n\n{suggestion}\n\n{TOOLSTATE_MSG}"
+            );
         }
+        cs => {
+            let cs_str = cs
+                .iter()
+                .map(|c| c.description(manifest))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = write!(
+                buf,
+                "some components unavailable for download for channel '{toolchain}': {cs_str}"
+            );
 
-        let _ = write!(
-            buf,
-            "If you don't need the component, you could try a minimal installation with:\n\n{suggestion}"
-        );
-    } else {
-        let cs_str = cs
-            .iter()
-            .map(|c| c.description(manifest))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let _ = write!(
-            buf,
-            "some components unavailable for download for channel '{toolchain}': {cs_str}"
-        );
+            if toolchain.starts_with("nightly") {
+                let _ = write!(buf, "{nightly_tips}");
+            }
 
-        if toolchain.starts_with("nightly") {
-            let _ = write!(buf, "{nightly_tips}");
+            let _ = write!(
+                buf,
+                "If you don't need the components, you could try a minimal installation with:\n\n{suggestion}\n\n{TOOLSTATE_MSG}"
+            );
         }
-        let _ = write!(
-            buf,
-            "If you don't need the components, you could try a minimal installation with:\n\n{suggestion}"
-        );
     }
 
     String::from_utf8(buf).unwrap()
 }
 
 #[derive(Debug, ThisError)]
-enum DistError {
+pub(crate) enum DistError {
     #[error("{}", components_missing_msg(.0, .1, .2))]
     ToolchainComponentsMissing(Vec<Component>, Box<ManifestV2>, String),
     #[error("no release found for '{0}'")]
     MissingReleaseForToolchain(String),
+    #[error("invalid toolchain name: '{0}'")]
+    InvalidOfficialName(String),
 }
 
 #[derive(Debug, PartialEq)]
@@ -102,7 +119,7 @@ struct ParsedToolchainDesc {
 // 'stable-msvc' to work. Partial target triples though are parsed
 // from a hardcoded set of known triples, whereas target triples
 // are nearly-arbitrary strings.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq, PartialOrd, Ord)]
 pub struct PartialToolchainDesc {
     // Either "nightly", "stable", "beta", or an explicit version number
     pub channel: String,
@@ -113,7 +130,10 @@ pub struct PartialToolchainDesc {
 // Fully-resolved toolchain descriptors. These always have full target
 // triples attached to them and are used for canonical identification,
 // such as naming their installation directory.
-#[derive(Debug, Clone)]
+//
+// as strings they look like stable-x86_64-pc-windows-msvc or
+/// 1.55-x86_64-pc-windows-msvc
+#[derive(Debug, Clone, Eq, PartialEq, PartialOrd, Ord)]
 pub struct ToolchainDesc {
     // Either "nightly", "stable", "beta", or an explicit version number
     pub channel: String,
@@ -152,15 +172,23 @@ static TRIPLE_MIPS64_UNKNOWN_LINUX_GNUABI64: &str = "mips64el-unknown-linux-gnua
 impl FromStr for ParsedToolchainDesc {
     type Err = anyhow::Error;
     fn from_str(desc: &str) -> Result<Self> {
-        lazy_static! {
-            static ref TOOLCHAIN_CHANNEL_PATTERN: String = format!(
+        // Note this regex gives you a guaranteed match of the channel (1)
+        // and an optional match of the date (2) and target (3)
+        static TOOLCHAIN_CHANNEL_RE: Lazy<Regex> = Lazy::new(|| {
+            Regex::new(&format!(
                 r"^({})(?:-(\d{{4}}-\d{{2}}-\d{{2}}))?(?:-(.+))?$",
-                TOOLCHAIN_CHANNELS.join("|")
-            );
-            // Note this regex gives you a guaranteed match of the channel (1)
-            // and an optional match of the date (2) and target (3)
-            static ref TOOLCHAIN_CHANNEL_RE: Regex = Regex::new(&TOOLCHAIN_CHANNEL_PATTERN).unwrap();
-        }
+                // The channel patterns we support
+                [
+                    "nightly",
+                    "beta",
+                    "stable",
+                    // Allow from 1.0.0 through to 9.999.99 with optional patch version
+                    r"\d{1}\.\d{1,3}(?:\.\d{1,2})?",
+                ]
+                .join("|")
+            ))
+            .unwrap()
+        });
 
         let d = TOOLCHAIN_CHANNEL_RE.captures(desc).map(|c| {
             fn fn_map(s: &str) -> Option<String> {
@@ -209,6 +237,29 @@ impl Deref for TargetTriple {
     }
 }
 
+/// Check if /bin/sh is a 32-bit binary. If it doesn't exist, fall back to
+/// checking if _we_ are a 32-bit binary.
+/// rustup-init.sh also relies on checking /bin/sh for bitness.
+#[cfg(not(windows))]
+fn is_32bit_userspace() -> bool {
+    use std::fs;
+    use std::io::{self, Read};
+
+    // inner function is to simplify error handling.
+    fn inner() -> io::Result<bool> {
+        let mut f = fs::File::open("/bin/sh")?;
+        let mut buf = [0; 5];
+        f.read_exact(&mut buf)?;
+
+        // ELF files start out "\x7fELF", and the following byte is
+        //   0x01 for 32-bit and
+        //   0x02 for 64-bit.
+        Ok(&buf == b"\x7fELF\x01")
+    }
+
+    inner().unwrap_or(cfg!(target_pointer_width = "32"))
+}
+
 impl TargetTriple {
     pub fn new(name: &str) -> Self {
         Self(name.to_string())
@@ -219,6 +270,28 @@ impl TargetTriple {
             Self::new(triple)
         } else {
             Self::new(env!("TARGET"))
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub(crate) fn is_host_emulated() -> bool {
+        false
+    }
+
+    /// Detects Rosetta emulation on macOS
+    #[cfg(target_os = "macos")]
+    pub(crate) fn is_host_emulated() -> bool {
+        unsafe {
+            let mut ret: libc::c_int = 0;
+            let mut size = std::mem::size_of::<libc::c_int>() as libc::size_t;
+            let err = libc::sysctlbyname(
+                b"sysctl.proc_translated\0".as_ptr().cast(),
+                (&mut ret) as *mut _ as *mut libc::c_void,
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            );
+            err == 0 && ret != 0
         }
     }
 
@@ -336,7 +409,11 @@ impl TargetTriple {
                 (b"Linux", b"arm") => Some("arm-unknown-linux-gnueabi"),
                 (b"Linux", b"armv7l") => Some("armv7-unknown-linux-gnueabihf"),
                 (b"Linux", b"armv8l") => Some("armv7-unknown-linux-gnueabihf"),
-                (b"Linux", b"aarch64") => Some(TRIPLE_AARCH64_UNKNOWN_LINUX),
+                (b"Linux", b"aarch64") => Some(if is_32bit_userspace() {
+                    "armv7-unknown-linux-gnueabihf"
+                } else {
+                    TRIPLE_AARCH64_UNKNOWN_LINUX
+                }),
                 (b"Darwin", b"x86_64") => Some("x86_64-apple-darwin"),
                 (b"Darwin", b"i686") => Some("i686-apple-darwin"),
                 (b"FreeBSD", b"x86_64") => Some("x86_64-unknown-freebsd"),
@@ -426,6 +503,7 @@ impl FromStr for PartialToolchainDesc {
 }
 
 impl PartialToolchainDesc {
+    /// Create a toolchain desc using input_host to fill in missing fields
     pub(crate) fn resolve(self, input_host: &TargetTriple) -> Result<ToolchainDesc> {
         let host = PartialTargetTriple::new(&input_host.0).ok_or_else(|| {
             anyhow!(format!(
@@ -526,21 +604,21 @@ impl ToolchainDesc {
     /// date field is empty.
     pub(crate) fn is_tracking(&self) -> bool {
         let channels = ["nightly", "beta", "stable"];
-        lazy_static! {
-            static ref TRACKING_VERSION: Regex = Regex::new(r"^\d{1}\.\d{1,3}$").unwrap();
-        }
+        static TRACKING_VERSION: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"^\d{1}\.\d{1,3}$").unwrap());
         (channels.iter().any(|x| *x == self.channel) || TRACKING_VERSION.is_match(&self.channel))
             && self.date.is_none()
     }
 }
 
-// A little convenience for just parsing a channel name or archived channel name
-pub(crate) fn validate_channel_name(name: &str) -> Result<()> {
-    let toolchain = PartialToolchainDesc::from_str(name)?;
-    if toolchain.has_triple() {
-        Err(anyhow!(format!("target triple in channel name '{name}'")))
-    } else {
-        Ok(())
+impl TryFrom<&ToolchainName> for ToolchainDesc {
+    type Error = DistError;
+
+    fn try_from(value: &ToolchainName) -> std::result::Result<Self, Self::Error> {
+        match value {
+            ToolchainName::Custom(n) => Err(DistError::InvalidOfficialName(n.str().into())),
+            ToolchainName::Official(n) => Ok(n.clone()),
+        }
     }
 }
 
@@ -650,6 +728,7 @@ pub(crate) fn valid_profile_names() -> String {
 // an upgrade then all the existing components will be upgraded.
 //
 // Returns the manifest's hash if anything changed.
+#[cfg_attr(feature = "otel", tracing::instrument(err, skip_all, fields(profile=format!("{profile:?}"), prefix=prefix.path().to_string_lossy().to_string())))]
 pub(crate) fn update_from_dist(
     download: DownloadCfg<'_>,
     update_hash: Option<&Path>,
@@ -664,7 +743,6 @@ pub(crate) fn update_from_dist(
 ) -> Result<Option<String>> {
     let fresh_install = !prefix.path().exists();
     let hash_exists = update_hash.map(Path::exists).unwrap_or(false);
-
     // fresh_install means the toolchain isn't present, but hash_exists means there is a stray hash file
     if fresh_install && hash_exists {
         // It's ok to unwrap, because hash have to exist at this point
@@ -789,7 +867,7 @@ fn update_from_dist_(
                         // no need to even print anything for missing nightlies,
                         // since we don't really "skip" them
                     }
-                    None => {
+                    _ => {
                         // All other errors break the loop
                         break Err(e);
                     }
@@ -915,7 +993,6 @@ fn try_update_from_dist_(
                 changes,
                 force_update,
                 &download,
-                &download.notify_handler,
                 &toolchain.manifest_name(),
                 true,
             ) {
@@ -1077,6 +1154,8 @@ fn date_from_manifest_date(date_str: &str) -> Option<NaiveDate> {
 
 #[cfg(test)]
 mod tests {
+    use rustup_macros::unit_test as test;
+
     use super::*;
 
     #[test]

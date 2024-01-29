@@ -3,7 +3,7 @@ use std::env;
 use std::path::PathBuf;
 use std::process::Command;
 
-use crate::process;
+use crate::{currentprocess::varsource::VarSource, process};
 
 pub const RUST_RECURSION_COUNT_MAX: u32 = 20;
 
@@ -38,26 +38,28 @@ pub(crate) fn inc(name: &str, cmd: &mut Command) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::ffi::{OsStr, OsString};
+
+    use rustup_macros::unit_test as test;
+
     use super::*;
     use crate::currentprocess;
     use crate::test::{with_saved_path, Env};
-
-    use std::collections::HashMap;
-    use std::ffi::{OsStr, OsString};
 
     #[test]
     fn prepend_unique_path() {
         let mut vars = HashMap::new();
         vars.env(
             "PATH",
-            env::join_paths(vec!["/home/a/.cargo/bin", "/home/b/.cargo/bin"].iter()).unwrap(),
+            env::join_paths(["/home/a/.cargo/bin", "/home/b/.cargo/bin"].iter()).unwrap(),
         );
-        let tp = Box::new(currentprocess::TestProcess {
+        let tp = currentprocess::TestProcess {
             vars,
             ..Default::default()
-        });
+        };
         with_saved_path(&mut || {
-            currentprocess::with(tp.clone(), || {
+            currentprocess::with(tp.clone().into(), || {
                 let mut path_entries = vec![];
                 let mut cmd = Command::new("test");
 
@@ -82,7 +84,7 @@ mod tests {
                         OsStr::new("PATH"),
                         Some(
                             env::join_paths(
-                                vec![
+                                [
                                     "/home/z/.cargo/bin",
                                     "/home/a/.cargo/bin",
                                     "/home/b/.cargo/bin"

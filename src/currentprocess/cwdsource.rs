@@ -4,6 +4,9 @@ use std::env;
 use std::io;
 use std::path::PathBuf;
 
+use enum_dispatch::enum_dispatch;
+
+#[enum_dispatch]
 pub trait CurrentDirSource {
     fn current_dir(&self) -> io::Result<PathBuf>;
 }
@@ -15,6 +18,7 @@ impl CurrentDirSource for super::OSProcess {
     }
 }
 
+#[cfg(feature = "test")]
 impl CurrentDirSource for super::TestProcess {
     fn current_dir(&self) -> io::Result<PathBuf> {
         Ok(self.cwd.clone())

@@ -1,4 +1,4 @@
-use lazy_static::lazy_static;
+use once_cell::sync::Lazy;
 use regex::Regex;
 
 // These lists contain the targets known to rustup, and used to build
@@ -47,7 +47,7 @@ static LIST_ENVS: &[&str] = &[
     "musl",
 ];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PartialTargetTriple {
     pub arch: Option<String>,
     pub os: Option<String>,
@@ -68,15 +68,16 @@ impl PartialTargetTriple {
         // we can count  on all triple components being
         // delineated by it.
         let name = format!("-{name}");
-        lazy_static! {
-            static ref PATTERN: String = format!(
+        static RE: Lazy<Regex> = Lazy::new(|| {
+            Regex::new(&format!(
                 r"^(?:-({}))?(?:-({}))?(?:-({}))?$",
                 LIST_ARCHS.join("|"),
                 LIST_OSES.join("|"),
                 LIST_ENVS.join("|")
-            );
-            static ref RE: Regex = Regex::new(&PATTERN).unwrap();
-        }
+            ))
+            .unwrap()
+        });
+
         RE.captures(&name).map(|c| {
             fn fn_map(s: &str) -> Option<String> {
                 if s.is_empty() {
@@ -97,7 +98,10 @@ impl PartialTargetTriple {
 
 #[cfg(test)]
 mod test {
+    use rustup_macros::unit_test as test;
+
     use super::*;
+
     #[test]
     fn test_partial_target_triple_new() {
         let success_cases = vec![
